@@ -1,0 +1,961 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Daily Activity Tracker (Team & Individual)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- jsPDF and related scripts for direct PDF generation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script>
+        // Use destructuring to access jsPDF constructor
+        const { jsPDF } = window.jspdf;
+    </script>
+    
+    <!-- Google Font Import for Poppins (Headings) and Inter (Body) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=Poppins:wght@600;800&display=swap" rel="stylesheet">
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, onAuthStateChanged, signOut, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, addDoc, collection, onSnapshot, query, serverTimestamp, setLogLevel, deleteDoc, getDoc, setDoc, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // IMPORTANT: Global variables provided by the environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        let db, auth, userId = null;
+        let isAuthReady = false;
+        let loggedBy = 'Unknown User'; // Variable to hold the initials of the current user
+        
+        // --- Team State Variables ---
+        let currentMode = 'Individual'; // 'Individual' or 'Team'
+        let currentTeamId = null; 
+        let currentTeamName = null; 
+        // ---------------------------
+
+        // Helper function to convert a name string (e.g., "Jane Doe Smith") into initials (e.g., "J. D. S.").
+        function convertToInitials(fullName) {
+            if (!fullName) return 'User';
+            const initials = fullName
+                .trim()
+                .split(/\s+/)
+                .map(word => word.charAt(0).toUpperCase())
+                .filter(char => char)
+                .join('. ');
+            
+            return initials.length > 0 ? initials + '.' : 'User';
+        }
+
+        // Helper function to convert a comma-separated list of names into a comma-separated list of initials.
+        function processAttendeeNames(attendeeString) {
+            if (!attendeeString || attendeeString.toLowerCase().trim() === 'self only') {
+                return 'Self Only';
+            }
+            const names = attendeeString.split(',').map(name => name.trim()).filter(name => name.length > 0);
+            const initialsArray = names.map(name => convertToInitials(name));
+            return initialsArray.join(', ');
+        }
+        
+        // Safely processes user object to get privacy-friendly initials.
+        function processUserName(user) {
+            if (!user) return 'U. N.'; 
+            if (user.isAnonymous) {
+                return 'T. U.'; // Tester User
+            } 
+            
+            // Generate a consistent, simple initial based on UID hash
+            if (user.uid) {
+                const hash = user.uid.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+                const letter1 = String.fromCharCode(65 + (hash % 26)); // A-Z
+                const letter2 = String.fromCharCode(65 + ((hash * 7) % 26)); // A-Z
+                return `${letter1}.${letter2}.`;
+            }
+            return 'G. U.'; // Generic User
+        }
+        
+        setLogLevel('debug');
+
+        if (firebaseConfig) {
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            
+            // --- MANDATORY AUTHENTICATION FLOW ---
+            async function initializeAuth() {
+                 try {
+                    if (initialAuthToken) {
+                        // Sign in using the custom token provided by the environment
+                        await signInWithCustomToken(auth, initialAuthToken);
+                        console.log("Authentication successful via custom token.");
+                    } else {
+                        // Fallback: Sign in anonymously if no custom token is available
+                        await signInAnonymously(auth);
+                        console.log("Authentication successful via anonymous sign-in.");
+                    }
+                } catch (error) {
+                    console.error("Critical Authentication Error:", error);
+                    showMessage("Authentication failed. Cannot load app.", "bg-red-500");
+                }
+            }
+
+            // Listener to handle sign-in/sign-out state changes
+            onAuthStateChanged(auth, async (user) => {
+                const authButton = document.getElementById('auth-button');
+                const content = document.getElementById('auth-required-content');
+
+                if (user) {
+                    userId = user.uid;
+                    loggedBy = processUserName(user);
+                    
+                    authButton.textContent = 'Sign Out';
+                    authButton.onclick = window.signOutUser;
+                    authButton.classList.remove('bg-green-600', 'hover:bg-green-700');
+                    authButton.classList.add('bg-gray-500', 'hover:bg-gray-600');
+                    
+                    content.classList.remove('hidden');
+                    
+                    // Initialize the team state and load the initial log view (Individual)
+                    await initializeTeamState(); 
+                    
+                } else {
+                    // This block runs after explicit sign out, setting up a new anonymous session
+                    userId = null;
+                    loggedBy = 'U. N.'; 
+                    currentTeamId = null;
+                    currentTeamName = null;
+                    currentMode = 'Individual';
+                    
+                    document.getElementById('user-id-display').textContent = `Status: Log in to save data`;
+                    authButton.textContent = 'Sign In Required';
+                    authButton.classList.remove('bg-gray-500', 'hover:bg-gray-600');
+                    authButton.classList.add('bg-green-600', 'hover:bg-green-700');
+                    content.classList.remove('hidden'); 
+                    renderEntries([]); 
+                }
+                
+                isAuthReady = true;
+            });
+            
+            // Start the mandatory authentication process
+            initializeAuth();
+
+        } else {
+            console.error("Firebase configuration is missing.");
+            document.getElementById('log-area').innerHTML = '<p class="text-red-500">Error: Firebase configuration missing. Cannot save data.</p>';
+            isAuthReady = true;
+            userId = 'anonymous-mock-id';
+        }
+
+        // --- FIREBASE COLLECTION REFERENCES ---
+        // Private (User-Specific) Collection
+        const individualLogsCollectionRef = (uid) => collection(db, 'artifacts', appId, 'users', uid, 'daily_log');
+        
+        // Public (Team-Specific) Collections
+        const teamInfoCollectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'teams_meta');
+        const publicLogsCollectionRef = (teamId) => collection(db, 'artifacts', appId, 'public', 'data', 'teams', teamId, 'daily_log');
+        // ------------------------------------------
+
+        // --- TEAM STATE MANAGEMENT ---
+
+        async function initializeTeamState() {
+            if (!userId) return;
+
+            // Check if the user was previously in a team (stored in user metadata doc)
+            const userMetaRef = doc(db, 'artifacts', appId, 'users', userId, 'metadata', 'team_info');
+            const userMetaSnap = await getDoc(userMetaRef);
+
+            if (userMetaSnap.exists()) {
+                const metaData = userMetaSnap.data();
+                currentTeamId = metaData.teamId || null;
+                
+                if (currentTeamId) {
+                    // Fetch team name
+                    const teamDocRef = doc(teamInfoCollectionRef, currentTeamId);
+                    const teamDocSnap = await getDoc(teamDocRef);
+                    if (teamDocSnap.exists()) {
+                        currentTeamName = teamDocSnap.data().name;
+                        currentMode = 'Team'; 
+                        showMessage(`Welcome back to Team: ${currentTeamName}!`, 'bg-indigo-500');
+                    } else {
+                        // Team doesn't exist anymore, clear local state
+                        currentTeamId = null;
+                        currentTeamName = null;
+                        await setDoc(userMetaRef, { teamId: null }, { merge: true });
+                    }
+                }
+            }
+            
+            // Set initial mode to Individual and load logs
+            updateUIForMode();
+            loadEntries();
+        }
+        
+        // Updates the UI elements based on the current mode and team state
+        function updateUIForMode() {
+            const statusDisplay = document.getElementById('user-id-display');
+            const logHeader = document.getElementById('log-type-header');
+            const exportButton = document.getElementById('export-pdf-button');
+            const switchButton = document.getElementById('mode-switch-button');
+            const teamMsg = document.getElementById('team-not-in-msg');
+            const teamModalButton = document.getElementById('open-team-modal-button');
+
+            const baseStatus = auth.currentUser.isAnonymous 
+                ? 'Status: Anonymous Tester (Private Data)' 
+                : `User: ${loggedBy} (ID: ${userId.substring(0, 8)}...)`;
+            
+            if (currentMode === 'Individual') {
+                logHeader.textContent = 'Individual Activity Log';
+                exportButton.textContent = 'Download Individual Report';
+                switchButton.textContent = 'Switch to Team View';
+                switchButton.classList.remove('bg-indigo-500');
+                switchButton.classList.add('bg-gray-500');
+                teamMsg.classList.add('hidden');
+                
+                statusDisplay.textContent = baseStatus;
+            } else if (currentMode === 'Team' && currentTeamId && currentTeamName) {
+                logHeader.textContent = `Team Log: ${currentTeamName}`;
+                exportButton.textContent = `Download Team Report (${currentTeamName})`;
+                switchButton.textContent = 'Switch to Individual View';
+                switchButton.classList.remove('bg-gray-500');
+                switchButton.classList.add('bg-indigo-500');
+                teamMsg.classList.add('hidden');
+                
+                statusDisplay.textContent = `${baseStatus} | TEAM: ${currentTeamName}`;
+            } else {
+                // Not in a team
+                currentMode = 'Individual';
+                teamMsg.classList.remove('hidden');
+                teamMsg.textContent = 'You are not currently in a team. Join or create one to use the Team Log.';
+                
+                switchButton.textContent = 'Switch to Team View';
+                switchButton.classList.remove('bg-indigo-500');
+                switchButton.classList.add('bg-gray-500');
+
+                statusDisplay.textContent = baseStatus;
+            }
+
+            if (currentTeamId) {
+                teamModalButton.textContent = `Change Team (${currentTeamName})`;
+            } else {
+                teamModalButton.textContent = `Join/Create Team`;
+            }
+        }
+
+        window.switchMode = () => {
+            if (!isAuthReady) return;
+            
+            if (currentMode === 'Individual' && (!currentTeamId || !currentTeamName)) {
+                 showMessage("You must join a team before switching to Team Mode.", 'bg-yellow-500');
+                 return;
+            }
+
+            if (currentMode === 'Individual') {
+                currentMode = 'Team';
+            } else {
+                currentMode = 'Individual';
+            }
+
+            updateUIForMode();
+            loadEntries();
+            showMessage(`Switched to ${currentMode} Mode.`, 'bg-indigo-500');
+        };
+
+        window.createTeam = async () => {
+            const teamName = document.getElementById('create-team-name').value.trim();
+            if (!teamName) {
+                showMessage("Please enter a valid team name.", 'bg-red-500');
+                return;
+            }
+            if (!userId) {
+                 showMessage("Authentication is not ready. Please wait.", 'bg-red-500');
+                 return;
+            }
+
+            try {
+                // 1. Create Team Metadata Document
+                const newTeamRef = doc(teamInfoCollectionRef);
+                const teamId = newTeamRef.id;
+
+                await setDoc(newTeamRef, {
+                    name: teamName,
+                    creatorId: userId,
+                    createdAt: serverTimestamp(),
+                    memberCount: 1,
+                    teamId: teamId
+                });
+
+                // 2. Update User Metadata
+                await setDoc(doc(db, 'artifacts', appId, 'users', userId, 'metadata', 'team_info'), 
+                    { teamId: teamId, teamName: teamName, joinedAt: serverTimestamp() }, 
+                    { merge: true }
+                );
+                
+                // 3. Update Local State and UI
+                currentTeamId = teamId;
+                currentTeamName = teamName;
+                currentMode = 'Team';
+                updateUIForMode();
+                closeTeamModal();
+                loadEntries();
+
+                showMessage(`Team "${teamName}" created and joined successfully!`, 'bg-green-600');
+            } catch (e) {
+                console.error("Error creating team:", e);
+                showMessage("Failed to create team. Check console.", 'bg-red-500');
+            }
+        };
+
+        window.joinTeam = async () => {
+            const teamIdInput = document.getElementById('join-team-id').value.trim();
+            if (!teamIdInput) {
+                showMessage("Please enter a valid Team ID.", 'bg-red-500');
+                return;
+            }
+            if (!userId) {
+                 showMessage("Authentication is not ready. Please wait.", 'bg-red-500');
+                 return;
+            }
+
+            try {
+                // 1. Check if Team exists
+                const teamDocRef = doc(teamInfoCollectionRef, teamIdInput);
+                const teamDocSnap = await getDoc(teamDocRef);
+
+                if (!teamDocSnap.exists()) {
+                    showMessage("Team ID not found. Please verify the ID.", 'bg-red-500');
+                    return;
+                }
+                const teamData = teamDocSnap.data();
+                
+                // 2. Update Team Metadata (member count is not critical, skip for simplicity)
+
+                // 3. Update User Metadata
+                await setDoc(doc(db, 'artifacts', appId, 'users', userId, 'metadata', 'team_info'), 
+                    { teamId: teamIdInput, teamName: teamData.name, joinedAt: serverTimestamp() }, 
+                    { merge: true }
+                );
+
+                // 4. Update Local State and UI
+                currentTeamId = teamIdInput;
+                currentTeamName = teamData.name;
+                currentMode = 'Team';
+                updateUIForMode();
+                closeTeamModal();
+                loadEntries();
+
+                showMessage(`Successfully joined Team: ${currentTeamName}!`, 'bg-green-600');
+            } catch (e) {
+                console.error("Error joining team:", e);
+                showMessage("Failed to join team. Check console.", 'bg-red-500');
+            }
+        };
+
+        // --- AUTH & SIGN OUT ---
+
+        // Function to sign out (now always a simple sign out)
+        window.signOutUser = async () => {
+            if (!isAuthReady) return;
+            try {
+                await signOut(auth);
+                // Re-authenticate using the custom token/anonymous flow to keep the app running
+                await initializeAuth();
+                
+                showMessage("Successfully signed out. A new anonymous session was started.", "bg-gray-500");
+            } catch (error) {
+                console.error("Error signing out:", error);
+                showMessage("Sign out failed. Check console.", "bg-red-500");
+            }
+        };
+
+        // --- SAVE, DELETE, LOAD ENTRIES ---
+
+        window.saveEntry = async () => {
+            if (!isAuthReady || !userId) {
+                showMessage("App is initializing. Please wait.", "bg-blue-500");
+                return;
+            }
+
+            const activity = document.getElementById('activity').value.trim();
+            let timeSpent = document.getElementById('time-spent').value.trim();
+            const attendees = document.getElementById('attendees').value.trim(); 
+            const notes = document.getElementById('notes').value.trim();
+            const selectedDate = document.getElementById('date-input').value;
+
+            if (!activity || !timeSpent || !selectedDate) {
+                showMessage("Please enter an activity, time spent, and select a date.", "bg-red-500");
+                return;
+            }
+
+            if (currentMode === 'Team' && !currentTeamId) {
+                showMessage("Cannot save to Team Log: You are not in a team.", "bg-red-500");
+                return;
+            }
+
+            if (timeSpent && !/[hms]/i.test(timeSpent)) {
+                timeSpent += 'h';
+            }
+            
+            const sanitizedAttendees = processAttendeeNames(attendees);
+
+            // Determine collection reference based on mode
+            const isTeamSave = currentMode === 'Team' && currentTeamId;
+            const collectionRef = isTeamSave 
+                ? publicLogsCollectionRef(currentTeamId) 
+                : individualLogsCollectionRef(userId);
+            
+            let newEntry = {
+                activity,
+                timeSpent, 
+                attendees: sanitizedAttendees,
+                notes: notes || 'No notes.',
+                loggedBy: loggedBy, 
+                dateAdded: selectedDate,
+                timestamp: serverTimestamp(),
+                userId: userId, // Always include userId for individual identification/deletion rights
+            };
+
+            try {
+                await addDoc(collectionRef, newEntry);
+                showMessage(`Activity logged successfully (${isTeamSave ? 'Team' : 'Private'}).`, "bg-green-500");
+                
+                // Clear inputs
+                document.getElementById('activity').value = '';
+                document.getElementById('time-spent').value = '';
+                document.getElementById('attendees').value = ''; 
+                document.getElementById('notes').value = '';
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                showMessage("Failed to save activity. Check console for details.", "bg-red-500");
+            }
+        };
+
+        window.deleteEntry = async (entryId, entryUserId) => {
+            if (!isAuthReady || !userId) {
+                showMessage("App is initializing. Please wait.", "bg-blue-500");
+                return;
+            }
+
+            // Only allow deletion if the current user is the original logger
+            if (userId !== entryUserId) {
+                 showMessage("You can only delete your own logs.", "bg-red-500");
+                 return;
+            }
+
+            let docPath;
+            if (currentMode === 'Individual') {
+                docPath = ['artifacts', appId, 'users', userId, 'daily_log', entryId];
+            } else if (currentMode === 'Team' && currentTeamId) {
+                docPath = ['artifacts', appId, 'public', 'data', 'teams', currentTeamId, 'daily_log', entryId];
+            } else {
+                 showMessage("Cannot delete: Invalid mode or no team selected.", "bg-red-500");
+                 return;
+            }
+            
+            const docRef = doc(db, ...docPath);
+
+            try {
+                await deleteDoc(docRef);
+                showMessage("Activity deleted successfully!", "bg-green-500");
+            } catch (e) {
+                console.error("Error deleting document: ", e);
+                showMessage("Failed to delete activity. Check console for details.", "bg-red-500");
+            }
+        };
+
+        let unsubscribeLogs = null; // Holds the unsubscribe function for the Firestore listener
+
+        function loadEntries() {
+            if (unsubscribeLogs) {
+                unsubscribeLogs(); // Stop listening to the previous collection
+                unsubscribeLogs = null;
+            }
+
+            if (!db || !userId) return;
+
+            let logQuery;
+            let collectionType;
+
+            if (currentMode === 'Individual') {
+                logQuery = query(individualLogsCollectionRef(userId));
+                collectionType = 'Individual';
+            } else if (currentMode === 'Team' && currentTeamId) {
+                logQuery = query(publicLogsCollectionRef(currentTeamId));
+                collectionType = currentTeamName;
+            } else {
+                // Should only happen if Team mode is selected but no team is joined
+                renderEntries([], 'Individual');
+                return;
+            }
+            
+            unsubscribeLogs = onSnapshot(logQuery, (snapshot) => {
+                const entries = [];
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    
+                    const timestamp = data.timestamp ? data.timestamp.seconds * 1000 : Date.now();
+                    entries.push({ 
+                        id: doc.id, 
+                        ...data, 
+                        timestamp: timestamp,
+                        timeDisplay: new Date(timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+                        dateDisplay: data.dateAdded || new Date(timestamp).toISOString().split('T')[0]
+                    });
+                });
+
+                // Client-side sorting for chronological order (oldest first).
+                entries.sort((a, b) => {
+                    if (a.dateAdded < b.dateAdded) return -1;
+                    if (a.dateAdded > b.dateAdded) return 1;
+                    if (a.timestamp < b.timestamp) return -1;
+                    if (a.timestamp > b.timestamp) return 1;
+                    return 0;
+                });
+
+                renderEntries(entries, collectionType);
+                window.currentLogEntries = entries; // Store for export
+            }, (error) => {
+                console.error(`Error listening to ${collectionType} logs:`, error);
+                document.getElementById('log-area').innerHTML = '<p class="text-red-500 p-4">Failed to load logs. Check console.</p>';
+            });
+        }
+
+        // Renders all entries including the delete button
+        function renderEntries(entries, collectionType) {
+            const logArea = document.getElementById('log-area');
+            logArea.innerHTML = '';
+            
+            if (entries.length === 0) {
+                const message = `<p class="text-gray-500 p-4 italic">No activities logged for ${collectionType} yet. Create an entry!</p>`;
+                logArea.innerHTML = message;
+                return;
+            }
+
+            const headerDiv = document.createElement('div');
+            headerDiv.className = 'grid grid-cols-12 font-bold text-gray-600 border-b-2 border-indigo-200 pb-2 mb-2 sticky top-0 bg-white/90 backdrop-blur-sm z-10';
+            headerDiv.innerHTML = `
+                <span class="col-span-2">Date</span>
+                <span class="col-span-4">Activity (Notes)</span> 
+                <span class="col-span-3">Attendees</span>
+                <span class="col-span-3 text-right">Time & Action</span>
+            `;
+            logArea.appendChild(headerDiv);
+
+            entries.forEach(entry => {
+                const entryDiv = document.createElement('div');
+                entryDiv.className = 'grid grid-cols-12 items-start bg-white p-3 rounded-lg shadow-sm mb-2 border border-gray-100 transition duration-100 hover:bg-indigo-50';
+                
+                // Only the original logger can delete the entry
+                const canDelete = userId === entry.userId; 
+
+                entryDiv.innerHTML = `
+                    <!-- Date Column (2/12) -->
+                    <div class="col-span-2 pt-1">
+                        <span class="text-sm font-semibold text-gray-700">${entry.dateDisplay}</span>
+                        <p class="text-xs text-gray-400 mt-1">${entry.timeDisplay}</p>
+                    </div> 
+                    
+                    <!-- Activity/Notes Column (4/12) -->
+                    <div class="col-span-4">
+                        <p class="font-bold text-indigo-700">${entry.activity}</p>
+                        <p class="text-xs text-gray-600 mt-1">${entry.notes === 'No notes.' ? '—' : entry.notes}</p>
+                    </div>
+
+                    <!-- Attendees Column (3/12) -->
+                    <div class="col-span-3 pt-1">
+                        <p class="text-sm text-gray-700 truncate" title="${entry.attendees}">${entry.attendees || 'Self Only'}</p>
+                        <p class="text-xs text-gray-400 mt-1 italic">Logged by: ${entry.loggedBy}</p> 
+                    </div>
+                    
+                    <!-- Time Spent & Action Column (3/12) -->
+                    <div class="col-span-3 pt-1 flex items-center justify-end space-x-3">
+                        <span class="text-base font-extrabold text-indigo-500">${entry.timeSpent}</span>
+                        ${canDelete ? `
+                        <button 
+                            onclick="deleteEntry('${entry.id}', '${entry.userId}')" 
+                            class="p-1 text-red-400 rounded-full hover:bg-red-100 hover:text-red-600 transition duration-150 transform hover:scale-105"
+                            title="Delete Entry"
+                        >
+                            <!-- Trash Icon SVG -->
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4">
+                                <polyline points="3 6 5 6 21 6"></polyline>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                            </svg>
+                        </button>
+                        ` : '<span class="w-4 h-4"></span>'}
+                    </div>
+                `;
+                logArea.appendChild(entryDiv);
+            });
+        }
+
+        window.generateDownloadablePDF = () => {
+            if (!userId) {
+                showMessage("You must be signed in to generate a report.", "bg-red-500");
+                return;
+            }
+            
+            const entries = window.currentLogEntries || [];
+            if (entries.length === 0) {
+                showMessage("No entries to export!", "bg-red-500");
+                return;
+            }
+
+            try {
+                const doc = new jsPDF('p', 'mm', 'a4');
+                let y = 15; // Starting Y position
+                const margin = 15;
+                const pageWidth = doc.internal.pageSize.getWidth();
+                const usableWidth = pageWidth - 2 * margin;
+
+                // Define Column widths and X positions
+                const colDateWidth = 20; 
+                const colActivityWidth = 45; 
+                const colAttendeesWidth = 45; 
+                const colTimeWidth = 20; 
+                const colNotesWidth = usableWidth - colDateWidth - colActivityWidth - colTimeWidth - colAttendeesWidth - 5; 
+
+                // X positions
+                const xDate = margin;
+                const xActivity = xDate + colDateWidth;
+                const xAttendees = xActivity + colActivityWidth; 
+                const xTime = xAttendees + colAttendeesWidth; 
+                const xNotes = xTime + colTimeWidth + 5; 
+
+                // TSA Brand Colors (Blues for Alternating Rows)
+                const colorLightBlue = '#E6F0FF'; 
+                const colorDarkBlue = '#B3CCFF';  
+                let entryCounter = 0;
+
+                doc.setFont('helvetica');
+
+                // 1. Title and Metadata
+                doc.setFontSize(24);
+                doc.setFont(undefined, 'bold');
+                
+                const reportName = currentMode === 'Team' ? `Team Activity Log (${currentTeamName})` : 'Individual Activity Log';
+                const titleText = `TSA ${reportName}`;
+                
+                doc.text(titleText, pageWidth / 2, y, { align: 'center' });
+                y += 8;
+                
+                doc.setFontSize(10);
+                doc.setFont(undefined, 'normal');
+                doc.setTextColor(100);
+                
+                const userName = loggedBy; 
+                doc.text(`Report for: ${userName} | Generated: ${new Date().toLocaleDateString()}`, pageWidth / 2, y, { align: 'center' });
+                y += 10;
+                doc.setTextColor(0); 
+
+                // Thick divider line
+                doc.setLineWidth(1.0);
+                doc.line(margin, y, pageWidth - margin, y);
+                y += 5;
+
+
+                // --- TABLE HEADERS ---
+                doc.setFontSize(10);
+                doc.setFont(undefined, 'bold');
+                doc.setTextColor(50);
+                doc.text("DATE", xDate, y);
+                doc.text("ACTIVITY", xActivity, y);
+                doc.text("ATTENDEES", xAttendees, y); 
+                doc.text("TIME", xTime, y);
+                doc.text("NOTES", xNotes, y);
+
+                y += 3;
+                doc.setLineWidth(0.5);
+                doc.line(margin, y, pageWidth - margin, y); 
+                y += 5;
+                doc.setFont(undefined, 'normal');
+                doc.setTextColor(0);
+
+                // --- ENTRIES LOOP ---
+                entries.forEach(entry => {
+                    
+                    doc.setFontSize(9);
+                    doc.setFont(undefined, 'normal');
+                    const notesText = doc.splitTextToSize(entry.notes === 'No notes.' ? '—' : entry.notes, colNotesWidth - 2); 
+                    const attendeesText = doc.splitTextToSize(entry.attendees || 'Self Only', colAttendeesWidth - 2); 
+                    
+                    const maxLines = Math.max(notesText.length, attendeesText.length);
+                    const notesLineHeight = 4.5;
+                    const requiredSpace = (maxLines * notesLineHeight) + 5; 
+
+                    // Page break logic
+                    if (y + requiredSpace > doc.internal.pageSize.getHeight() - margin) {
+                        doc.addPage();
+                        y = margin;
+                        
+                        // Repeat Column Headers on new page
+                        doc.setFontSize(10);
+                        doc.setFont(undefined, 'bold');
+                        doc.setTextColor(50);
+                        doc.text("DATE (Continued)", xDate, y);
+                        doc.text("ACTIVITY", xActivity, y);
+                        doc.text("ATTENDEES", xAttendees, y); 
+                        doc.text("TIME", xTime, y);
+                        doc.text("NOTES", xNotes, y);
+                        y += 3;
+                        doc.setLineWidth(0.5);
+                        doc.line(margin, y, pageWidth - margin, y);
+                        y += 5;
+                        doc.setFont(undefined, 'normal');
+                        doc.setTextColor(0);
+                        entryCounter = 0; 
+                    }
+                    
+                    // --- APPLY ALTERNATING ROW COLOR ---
+                    entryCounter++;
+                    const fillColor = entryCounter % 2 === 1 ? colorLightBlue : colorDarkBlue;
+                    doc.setFillColor(fillColor);
+                    doc.rect(margin, y - 3, usableWidth, requiredSpace + 1, 'F');
+                    
+                    let currentY = y;
+                    
+                    // Draw content
+                    doc.setFontSize(10);
+                    doc.text(entry.dateDisplay, xDate, currentY); 
+                    doc.setFont(undefined, 'bold');
+                    doc.text(entry.activity, xActivity, currentY); 
+                    doc.setFont(undefined, 'normal');
+                    doc.text(entry.timeSpent, xTime, currentY); 
+
+                    // Draw wrapped attendees
+                    let attendeesY = currentY;
+                    doc.setFontSize(9);
+                    attendeesText.forEach((line) => {
+                        doc.text(line, xAttendees, attendeesY); 
+                        attendeesY += notesLineHeight;
+                    });
+                    
+                    // Draw wrapped notes
+                    doc.setFontSize(9);
+                    notesText.forEach((line) => {
+                        doc.text(line, xNotes, currentY); 
+                        currentY += notesLineHeight;
+                    });
+
+                    // Draw row separator line (set invisible for clean color block)
+                    doc.setLineWidth(0.1);
+                    doc.setDrawColor(fillColor); 
+                    doc.line(margin, y + requiredSpace - 2, pageWidth - margin, y + requiredSpace - 2);
+                    doc.setDrawColor(0);
+                    y = currentY + 1; // Space before next entry
+                });
+
+
+                // 3. Final Download
+                const filename = `TSA_${currentMode}_Log_${new Date().toISOString().split('T')[0]}.pdf`;
+                doc.save(filename);
+                showMessage("PDF generated and downloaded!", "bg-green-600");
+
+            } catch (e) {
+                console.error("Error during PDF generation:", e);
+                showMessage("PDF generation failed. Check console for error.", "bg-red-500");
+            }
+        };
+
+        function showMessage(text, colorClass) {
+            const msg = document.getElementById('status-message');
+            msg.textContent = text;
+            msg.className = `px-4 py-2 text-white text-sm rounded-full shadow-lg transition-opacity duration-300 ${colorClass} opacity-100`;
+            setTimeout(() => {
+                msg.className = `px-4 py-2 text-white text-sm rounded-full shadow-lg transition-opacity duration-300 ${colorClass} opacity-0`;
+            }, 3000);
+        }
+        
+        // --- MODAL FUNCTIONS ---
+        window.openTeamModal = () => {
+             document.getElementById('team-modal').classList.remove('hidden');
+             if (currentTeamId) {
+                 document.getElementById('current-team-info').classList.remove('hidden');
+                 document.getElementById('current-team-name-display').textContent = currentTeamName;
+                 document.getElementById('current-team-id-display').textContent = currentTeamId;
+             } else {
+                 document.getElementById('current-team-info').classList.add('hidden');
+             }
+        };
+
+        window.closeTeamModal = () => {
+             document.getElementById('team-modal').classList.add('hidden');
+        };
+        // -----------------------
+
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fc;
+        }
+        h1, h2 {
+            font-family: 'Poppins', sans-serif;
+        }
+        .container-shadow {
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
+        }
+        #log-area::-webkit-scrollbar {
+            display: none;
+        }
+        #log-area {
+            -ms-overflow-style: none; /* IE and Edge */
+            scrollbar-width: none; /* Firefox */
+            transition: opacity 0.3s ease-in-out;
+        }
+    </style>
+</head>
+<body class="min-h-screen p-4 sm:p-8">
+    <div id="message-box"></div>
+    <div class="max-w-4xl mx-auto">
+        
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-extrabold text-indigo-700 tracking-tight">Daily Log Tracker (TSA Chapter)</h1>
+            <h2 class="text-xl font-semibold text-gray-600 mt-2">Team & Individual Activity Tracking</h2>
+            
+            <!-- Auth Status and Buttons -->
+            <div class="mt-4 flex justify-center items-center space-x-4 flex-wrap">
+                <p id="user-id-display" class="text-sm text-gray-500 mt-1 mb-2 sm:mb-0">Initializing...</p>
+                
+                <button 
+                    id="open-team-modal-button"
+                    onclick="openTeamModal()"
+                    class="px-4 py-2 text-sm font-semibold rounded-full shadow-lg transition duration-150 bg-indigo-600 text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                >
+                    Join/Create Team
+                </button>
+
+                 <button 
+                    id="mode-switch-button"
+                    onclick="switchMode()"
+                    class="px-4 py-2 text-sm font-semibold rounded-full shadow-lg transition duration-150 bg-gray-500 text-white hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-400 mt-2 sm:mt-0"
+                >
+                    Switch Mode
+                </button>
+                
+                <button 
+                    id="auth-button" 
+                    class="px-4 py-2 text-sm font-semibold rounded-full shadow-lg transition duration-150 focus:outline-none focus:ring-2 focus:ring-offset-2 mt-2 sm:mt-0"
+                >
+                    Loading Authentication...
+                </button>
+            </div>
+        </header>
+
+        <!-- Content that requires authentication -->
+        <div id="auth-required-content">
+            <!-- Input Form -->
+            <div class="bg-white p-6 md:p-8 rounded-2xl container-shadow mb-8 border border-gray-100">
+                <h2 class="text-2xl font-semibold text-gray-800 mb-4 border-b pb-2">Log New Activity</h2>
+                <p id="current-log-mode-indicator" class="text-sm text-indigo-500 italic mb-4">You are currently logging to your **Individual Log**.</p>
+                <form id="entry-form" onsubmit="event.preventDefault(); saveEntry();">
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                        <div>
+                            <label for="date-input" class="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                            <input type="date" id="date-input" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150">
+                        </div>
+                        <div>
+                            <label for="activity" class="block text-sm font-medium text-gray-700 mb-1">Activity</label>
+                            <input type="text" id="activity" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150" placeholder="e.g., Competition Prep">
+                        </div>
+                        <div>
+                            <label for="time-spent" class="block text-sm font-medium text-gray-700 mb-1">Time Spent</label>
+                            <input type="text" id="time-spent" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150" placeholder="e.g., 1.5 or 30m">
+                        </div>
+                        <div class="md:col-span-1 flex items-end">
+                            <button type="submit" class="w-full p-3 bg-indigo-600 text-white font-bold rounded-lg shadow-md hover:bg-indigo-700 transition duration-150 transform hover:scale-[1.01]">
+                                Add Log
+                            </button>
+                        </div>
+                    </div>
+                    <div class="mb-4">
+                        <label for="attendees" class="block text-sm font-medium text-gray-700 mb-1">Who Attended? (Names or Roles)</label>
+                        <textarea id="attendees" rows="1" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150" placeholder="List the names of others involved, separated by commas (e.g., Jane Doe, Bob Smith, Advisor A)"></textarea>
+                    </div>
+                    <div class="mb-4">
+                        <label for="notes" class="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                        <textarea id="notes" rows="2" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150" placeholder="A brief description or outcome..."></textarea>
+                    </div>
+                </form>
+                <div id="status-message-container" class="mt-4 flex justify-center h-8">
+                    <span id="status-message" class="opacity-0"></span>
+                </div>
+            </div>
+
+            <!-- Log Display and Export Section -->
+            <div class="bg-white p-6 md:p-8 rounded-2xl container-shadow border border-gray-100">
+                <div class="flex justify-between items-center mb-4 border-b pb-2">
+                    <h2 id="log-type-header" class="text-2xl font-semibold text-gray-800">Individual Activity Log</h2>
+                    <button id="export-pdf-button" onclick="generateDownloadablePDF()" class="px-4 py-2 bg-green-600 text-white font-semibold rounded-lg shadow-md hover:bg-green-700 transition duration-150 flex items-center space-x-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="17" x2="12" y2="10"></line><polyline points="9 14 12 17 15 14"></polyline></svg>
+                        <span>Download Individual Report</span>
+                    </button>
+                </div>
+                
+                <p id="team-not-in-msg" class="text-center text-orange-500 p-2 bg-orange-50 rounded-lg font-medium mb-4 hidden">
+                    You are not currently in a team. Join or create one to use the Team Log.
+                </p>
+
+                <div id="log-area" class="max-h-[60vh] overflow-y-auto">
+                    <p class="text-center text-gray-400 italic mt-8">No activities to display. Please sign in.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Team Modal -->
+    <div id="team-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-75 overflow-y-auto h-full w-full z-50">
+        <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+            <div class="mt-3 text-center">
+                <h3 class="text-xl leading-6 font-medium text-gray-900 mb-4">Manage Team</h3>
+                
+                <!-- Current Team Info -->
+                <div id="current-team-info" class="bg-indigo-50 p-3 rounded-lg mb-4 hidden">
+                    <p class="text-sm font-medium text-indigo-700">Current Team: <span id="current-team-name-display" class="font-bold"></span></p>
+                    <p class="text-xs text-indigo-500 break-all mt-1">ID: <span id="current-team-id-display"></span></p>
+                </div>
+
+                <!-- Create Team -->
+                <div class="p-3 border border-indigo-200 rounded-lg mb-4">
+                    <h4 class="font-semibold text-gray-700 mb-2">Create a New Team</h4>
+                    <input type="text" id="create-team-name" placeholder="Enter New Team Name" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 text-sm mb-2">
+                    <button onclick="createTeam()" class="w-full px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 text-sm">
+                        Create & Join
+                    </button>
+                </div>
+
+                <div class="text-gray-400 text-sm mb-4">— OR —</div>
+
+                <!-- Join Team -->
+                <div class="p-3 border border-green-200 rounded-lg">
+                    <h4 class="font-semibold text-gray-700 mb-2">Join Existing Team</h4>
+                    <input type="text" id="join-team-id" placeholder="Paste Team ID here" class="w-full p-2 border border-gray-300 rounded-lg focus:ring-green-500 focus:border-green-500 text-sm mb-2">
+                    <button onclick="joinTeam()" class="w-full px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm">
+                        Join Team
+                    </button>
+                </div>
+
+                <div class="items-center px-4 py-3">
+                    <button id="close-modal-button" onclick="closeTeamModal()" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300 mt-4 text-sm">
+                        Close
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Script to set default date to today -->
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const dateInput = document.getElementById('date-input');
+            if (dateInput) {
+                // Set default value to today in YYYY-MM-DD format
+                dateInput.value = new Date().toISOString().split('T')[0];
+            }
+        });
+    </script>
+</body>
+</html>
