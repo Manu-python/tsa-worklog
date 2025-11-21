@@ -22,10 +22,22 @@
         import { getAuth, onAuthStateChanged, signOut, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, addDoc, collection, onSnapshot, query, serverTimestamp, setLogLevel, deleteDoc, getDoc, setDoc, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // IMPORTANT: Global variables provided by the environment
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        // HARDCODED FIREBASE CONFIGURATION
+        const firebaseConfig = {
+          apiKey: "AIzaSyBkcgw1FRj9pwbMD4f6XClajMpjW7oxLjk",
+          authDomain: "tsa-worklog-website.firebaseapp.com",
+          projectId: "tsa-worklog-website",
+          storageBucket: "tsa-worklog-website.firebasestorage.app",
+          messagingSenderId: "311436528418",
+          appId: "1:311436528418:web:eb489e8101aebc0996737b",
+          measurementId: "G-Z7K3MBGTZF"
+        };
+        
+        // Use the appId from the config directly for the data path construction
+        const appId = firebaseConfig.appId;
+        
+        // initialAuthToken is NOT USED in this static deployment, so we define it as null
+        const initialAuthToken = null;
         
         let db, auth, userId = null;
         let isAuthReady = false;
