@@ -23,9 +23,11 @@
         import { getAuth, onAuthStateChanged, signOut, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, addDoc, collection, onSnapshot, query, serverTimestamp, setLogLevel, deleteDoc, getDoc, setDoc, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // HARDCODED FIREBASE CONFIGURATION
+        // ⬅️ START OF FIREBASE CONFIGURATION BLOCK
+
+        // HARDCODED FIREBASE CONFIGURATION (Your actual unique keys)
         const firebaseConfig = {
-          apiKey: "AIzaSyBkcgw1FRj9pwbMD4f6XClajMpjW7oxLjk",
+          apiKey: "AIzaSyBkcgw1FRj9pwbMD4f6XClajMpjW7oxLjk", // Your API Key
           authDomain: "tsa-worklog-website.firebaseapp.com",
           projectId: "tsa-worklog-website",
           storageBucket: "tsa-worklog-website.firebasestorage.app",
@@ -34,15 +36,14 @@
           measurementId: "G-Z7K3MBGTZF"
         };
         
-        // Use the appId from the config directly for the data path construction
-        const appId = firebaseConfig.appId;
-        
-        // initialAuthToken is NOT USED in this static deployment, so we define it as null
-        const initialAuthToken = null;
-        
         let db, auth, userId = null;
-        let isAuthReady = false;
-        let loggedBy = 'Unknown User'; // Variable to hold the initials of the current user
+        // Use the app ID directly from the config
+        const appId = firebaseConfig.appId; 
+        let loggedBy = 'Unknown User'; 
+        let isAuthReady = false; 
+        const initialAuthToken = null; // Defined as null since we aren't using a custom server token
+        
+        // ⬅️ END OF FIREBASE CONFIGURATION BLOCK
         
         // --- Team State Variables ---
         let currentMode = 'Individual'; // 'Individual' or 'Team'
