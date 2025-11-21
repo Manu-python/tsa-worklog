@@ -97,7 +97,11 @@
             const app = initializeApp(firebaseConfig);
             db = getFirestore(app);
             auth = getAuth(app);
-            
+
+            const individualLogsCollectionRef = (uid) => collection(db, 'artifacts', appId, 'users', uid, 'daily_log');
+            const teamInfoCollectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'teams_meta');
+            const publicLogsCollectionRef = (teamId) => collection(db, 'artifacts', appId, 'public', 'data', 'teams', teamId, 'daily_log');
+                
             // --- MANDATORY AUTHENTICATION FLOW ---
             async function initializeAuth() {
                  try {
@@ -167,8 +171,6 @@
         // --- FIREBASE COLLECTION REFERENCES ---
         // Private (User-Specific) Collection
         const individualLogsCollectionRef = (uid) => collection(db, 'artifacts', appId, 'users', uid, 'daily_log');
-        
-        // Public (Team-Specific) Collections
         const teamInfoCollectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'teams_meta');
         const publicLogsCollectionRef = (teamId) => collection(db, 'artifacts', appId, 'public', 'data', 'teams', teamId, 'daily_log');
         // ------------------------------------------
